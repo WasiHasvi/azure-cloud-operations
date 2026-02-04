@@ -1,0 +1,248 @@
+name: Create Windows VM (Private)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rgName:
+        description: "Resource Group name"
+        required: true
+        type: string
+      location:
+        description: "Azure region (e.g., eastus, westeurope, centralindia)"
+        required: true
+        default: "eastus"
+        type: string
+      vmName:
+        description: "Windows VM name"
+        required: true
+        default: "winvm01"
+        type: string
+      adminUsername:
+        description: "Windows local admin username"
+        required: true
+        default: "azureadmin"
+        type: string
+
+      # Network inputs (you can accept defaults or override)
+      vnetName:
+        description: "VNet name (created if missing)"
+        required: true
+        default: "vnet-private"
+        type: string
+      vnetCidr:
+        description: "VNet CIDR"
+        required: true
+        default: "10.0.0.0/16"
+        type: string
+      subnetName:
+        description: "Subnet name (created if missing)"
+        required: true
+        default: "snet-app"
+        type: string
+      subnetCidr:
+        description: "Subnet CIDR"
+        required: true
+        default: "10.0.1.0/24"
+        type: string
+      nsgName:
+        description: "NSG name (deny inbound; allow intra-VNet)"
+        required: true
+        default: "nsg-snet-app"
+        type: string
+
+      # VM sizing & image
+      vmSize:
+        description: "VM size"
+        required: true
+        default: "Standard_D2s_v5"
+        type: string
+      imagePublisher:
+        description: "Image publisher"
+        required: true
+        default: "MicrosoftWindowsServer"
+        type: string
+      imageOffer:
+        description: "Image offer"
+        required: true
+        default: "WindowsServer"
+        type: string
+      imageSku:
+        description: "Image SKU"
+        required: true
+        default: "2022-datacenter-azure-edition"
+        type: string
+
+permissions:
+  id-token: write
+  contents: read
+
+jobs:
+  create-windows-vm:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate inputs (basic)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cidr in "${{ github.event.inputs.vnetCidr }}" "${{ github.event.inputs.subnetCidr }}"; do
+            if ! [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
+              echo "Invalid CIDR: $cidr" >&2
+              exit 1
+            fi
+          done
+          # Username sanity (Azure disallows some names; keep simple check here)
+          if [[ "${{ github.event.inputs.adminUsername }}" =~ [^a-zA-Z0-9-_] ]]; then
+            echo "Invalid adminUsername; use letters, numbers, dash, underscore." >&2
+            exit 1
+          fi
+
+      - name: Create Resource Group (idempotent)
+        run: |
+          az group create \
+            --name "${{ github.event.inputs.rgName }}" \
+            --location "${{ github.event.inputs.location }}" \
+            --tags "owner=${{ github.actor }}" "purpose=windows-vm"
+
+      - name: Ensure NSG with deny inbound (allow intra-VNet)
+        run: |
+          RG="${{ github.event.inputs.rgName }}"
+          NSG="${{ github.event.inputs.nsgName }}"
+          LOC="${{ github.event.inputs.location }}"
+
+          # Create NSG if missing
+          if ! az network nsg show -g "$RG" -n "$NSG" &>/dev/null; then
+            az network nsg create -g "$RG" -n "$NSG" -l "$LOC"
+          fi
+
+          # Rule: Allow VNet intra traffic (Inbound)
+          az network nsg rule create -g "$RG" --nsg-name "$NSG" -n AllowVnetIntra \
+            --priority 100 --direction Inbound --access Allow --protocol '*' \
+            --source-address-prefixes VirtualNetwork --destination-address-prefixes VirtualNetwork \
+            --source-port-ranges '*' --destination-port-ranges '*' \
+            --only-show-errors || true
+
+          # (Optional) Allow Azure Load Balancer probes (harmless if not used)
+          az network nsg rule create -g "$RG" --nsg-name "$NSG" -n AllowAzureLoadBalancer \
+            --priority 110 --direction Inbound --access Allow --protocol '*' \
+            --source-address-prefixes AzureLoadBalancer --destination-address-prefixes '*' \
+            --source-port-ranges '*' --destination-port-ranges '*' \
+            --only-show-errors || true
+
+          # Explicit deny all inbound
+          az network nsg rule create -g "$RG" --nsg-name "$NSG" -n DenyAllInbound \
+            --priority 4096 --direction Inbound --access Deny --protocol '*' \
+            --source-address-prefixes '*' --destination-address-prefixes '*' \
+            --source-port-ranges '*' --destination-port-ranges '*' \
+            --only-show-errors || true
+
+      - name: Ensure VNet & Subnet (associate NSG)
+        run: |
+          RG="${{ github.event.inputs.rgName }}"
+          VNET="${{ github.event.inputs.vnetName }}"
+          SNET="${{ github.event.inputs.subnetName }}"
+          LOC="${{ github.event.inputs.location }}"
+          VNET_CIDR="${{ github.event.inputs.vnetCidr }}"
+          SNET_CIDR="${{ github.event.inputs.subnetCidr }}"
+          NSG="${{ github.event.inputs.nsgName }}"
+
+          if az network vnet show -g "$RG" -n "$VNET" &>/dev/null; then
+            echo "VNet exists."
+          else
+            az network vnet create \
+              -g "$RG" -n "$VNET" -l "$LOC" \
+              --address-prefixes "$VNET_CIDR" \
+              --subnet-name "$SNET" \
+              --subnet-prefixes "$SNET_CIDR"
+          fi
+
+          # Ensure subnet exists
+          if az network vnet subnet show -g "$RG" --vnet-name "$VNET" -n "$SNET" &>/dev/null; then
+            echo "Subnet exists."
+          else
+            az network vnet subnet create -g "$RG" --vnet-name "$VNET" -n "$SNET" --address-prefixes "$SNET_CIDR"
+          fi
+
+          # Attach NSG to subnet
+          az network vnet subnet update \
+            -g "$RG" --vnet-name "$VNET" -n "$SNET" \
+            --network-security-group "$NSG"
+
+      - name: Create NIC (no public IP)
+        id: nic
+        run: |
+          RG="${{ github.event.inputs.rgName }}"
+          NIC_NAME="${{ github.event.inputs.vmName }}-nic"
+          VNET="${{ github.event.inputs.vnetName }}"
+          SNET="${{ github.event.inputs.subnetName }}"
+          LOC="${{ github.event.inputs.location }}"
+
+          if az network nic show -g "$RG" -n "$NIC_NAME" &>/dev/null; then
+            echo "NIC exists."
+          else
+            az network nic create \
+              -g "$RG" -n "$NIC_NAME" -l "$LOC" \
+              --vnet-name "$VNET" --subnet "$SNET" \
+              --ip-forwarding false \
+              --accelerated-networking false \
+              --private-ip-address-version IPv4 \
+              --only-show-errors
+          fi
+
+          NIC_ID=$(az network nic show -g "$RG" -n "$NIC_NAME" --query id -o tsv)
+          echo "nicId=$NIC_ID" >> $GITHUB_OUTPUT
+
+      - name: Create Windows VM (attach NIC; no public IP; no NSG on NIC)
+        run: |
+          RG="${{ github.event.inputs.rgName }}"
+          VM="${{ github.event.inputs.vmName }}"
+          LOC="${{ github.event.inputs.location }}"
+          SIZE="${{ github.event.inputs.vmSize }}"
+          ADMIN="${{ github.event.inputs.adminUsername }}"
+          ADMIN_PWD="${{ secrets.WIN_ADMIN_PASSWORD }}"
+          NIC_ID="${{ steps.nic.outputs.nicId }}"
+          PUB="${{ github.event.inputs.imagePublisher }}"
+          OFF="${{ github.event.inputs.imageOffer }}"
+          SKU="${{ github.event.inputs.imageSku }}"
+
+          if az vm show -g "$RG" -n "$VM" &>/dev/null; then
+            echo "VM already exists; skipping creation."
+          else
+            # Note: Using --nics with a pre-created NIC (no public IP), and --nsg '' prevents az vm create from creating a default NSG.
+            az vm create \
+              -g "$RG" -n "$VM" -l "$LOC" \
+              --size "$SIZE" \
+              --nics "$NIC_ID" \
+              --image "${PUB}:${OFF}:${SKU}:latest" \
+              --admin-username "$ADMIN" \
+              --admin-password "$ADMIN_PWD" \
+              --os-disk-name "${VM}-osdisk" \
+              --os-disk-size-gb 127 \
+              --storage-sku Premium_LRS \
+              --license-type Windows_Server \
+              --nsg "" \
+              --public-ip-address "" \
+              --no-wait
+
+            echo "VM creation submitted (no public IP; inbound blocked at subnet NSG)."
+          fi
+
+      - name: Show VM private IP and state
+        run: |
+          RG="${{ github.event.inputs.rgName }}"
+          VM="${{ github.event.inputs.vmName }}"
+          echo "Waiting briefly for instance view..."
+          az vm wait -g "$RG" -n "$VM" --created --interval 10 --timeout 600 || true
+          az vm show -g "$RG" -n "$VM" -d -o table | sed '1,2!d' || true
+          echo "--- NICs & IP Configuration ---"
+          az vm nic list -g "$RG" --vm-name "$VM" -o table || true

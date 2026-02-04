@@ -1,4 +1,4 @@
-name: Create Azure Key Vault
+name: Create Azure Key Vault (Manual)
 
 on:
   workflow_dispatch:
@@ -13,20 +13,18 @@ on:
         default: "eastus"
         type: string
       keyVaultName:
-        description: "Key Vault name (globally unique; 3-24 chars, a-z0-9-)"
+        description: "Desired Key Vault name (3–24 chars, lowercase/digits/hyphens; start letter; end alphanumeric)"
         required: true
-        default: "kv-$(date +%y%m%d)-dev"
+        default: "kv-shared-ops-ci"
         type: string
       sku:
         description: "Key Vault SKU"
         required: true
         default: "standard"
         type: choice
-        options:
-          - standard
-          - premium
+        options: ["standard", "premium"]
       enableRBAC:
-        description: "Use RBAC authorization (recommended) instead of access policies"
+        description: "Use RBAC authorization (recommended)"
         required: true
         default: "true"
         type: choice
@@ -44,112 +42,101 @@ on:
         type: choice
         options: ["Disabled", "Enabled"]
       defaultAction:
-        description: "Firewall default action (if PNA Enabled)"
+        description: "Firewall default action (when PNA Enabled)"
         required: true
         default: "Deny"
         type: choice
         options: ["Deny", "Allow"]
       grantSecretsOfficerToThisSP:
-        description: "Grant 'Key Vault Secrets Officer' to this workflow's Service Principal"
+        description: "Grant 'Key Vault Secrets Officer' to this workflow's SP"
         required: true
         default: "true"
         type: choice
         options: ["true", "false"]
 
 permissions:
-  id-token: write   # required for OIDC
+  id-token: write
   contents: read
 
 jobs:
   create-kv:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Azure Login (OIDC)
+      - name: Azure login (OIDC)
         uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
           tenant-id: ${{ vars.AZURE_TENANT_ID }}
           subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
 
-      - name: Validate inputs
+      - name: Ensure Microsoft.KeyVault provider is registered
         shell: bash
         run: |
           set -euo pipefail
-          # kv name constraints: 3-24 chars; a-z 0-9 - only; must start/end with alphanumeric
-          kv='${{ github.event.inputs.keyVaultName }}'
-          if ! [[ "$kv" =~ ^[a-z0-9]([a-z0-9-]{1,22})[a-z0-9]$ ]]; then
-            echo "::error title=Invalid Key Vault name::'$kv' must be 3-24 chars, lower-case letters, numbers, and hyphens; start/end with alphanumeric."
+          az provider register -n Microsoft.KeyVault --wait
+          az provider show -n Microsoft.KeyVault \
+            --query "{namespace:namespace,state:registrationState}" -o table
+
+      - name: Sanitize Key Vault name
+        id: sanitizekv
+        shell: bash
+        run: |
+          set -euo pipefail
+          raw='${{ github.event.inputs.keyVaultName }}'
+          kv=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]')
+          kv=$(printf '%s' "$kv" | sed 's/[^a-z0-9-]/-/g' | sed 's/-\{2,\}/-/g')
+          [[ $kv =~ ^[a-z] ]] || kv="kv-$kv"
+          kv=${kv%%-}
+          kv=${kv:0:24}
+          kv=${kv%%-}
+          if ! [[ $kv =~ ^[a-z][a-z0-9-]{1,22}[a-z0-9]$ ]]; then
+            echo "::error::Invalid Key Vault name after sanitization: '$raw' → '$kv'."
             exit 1
           fi
-          echo "Input validation OK."
+          echo "name=$kv" >> "$GITHUB_OUTPUT"
+          echo "Using Key Vault name: $kv"
 
-      - name: Create/Update Resource Group (idempotent)
+      - name: Ensure Resource Group
         run: |
           az group create \
             --name "${{ github.event.inputs.rgName }}" \
             --location "${{ github.event.inputs.location }}" \
             --tags "owner=${{ github.actor }}" "purpose=key-vault"
 
-      - name: Create Key Vault (idempotent)
+      - name: Create/Configure Key Vault
         id: createkv
         shell: bash
         run: |
           RG="${{ github.event.inputs.rgName }}"
           LOC="${{ github.event.inputs.location }}"
-          KV="${{ github.event.inputs.keyVaultName }}"
+          KV="${{ steps.sanitizekv.outputs.name }}"
           SKU="${{ github.event.inputs.sku }}"
           RBAC="${{ github.event.inputs.enableRBAC }}"
           PURGE="${{ github.event.inputs.enablePurgeProtection }}"
           PNA="${{ github.event.inputs.publicNetworkAccess }}"
           DFA="${{ github.event.inputs.defaultAction }}"
 
-          # Create (or no-op if exists). Note: soft-delete is on by default in Azure.
-          CREATE_ARGS=( -n "$KV" -g "$RG" -l "$LOC" --sku "$SKU" )
-          if [[ "$RBAC" == "true" ]]; then
-            CREATE_ARGS+=( --enable-rbac-authorization true )
-          fi
-          if [[ "$PURGE" == "true" ]]; then
-            CREATE_ARGS+=( --enable-purge-protection true )
-          fi
+          ARGS=( -n "$KV" -g "$RG" -l "$LOC" --sku "$SKU" )
+          [[ "$RBAC" == "true" ]] && ARGS+=( --enable-rbac-authorization true )
+          [[ "$PURGE" == "true" ]] && ARGS+=( --enable-purge-protection true )
 
-          # Try create; if it already exists, this is idempotent and returns the resource.
-          az keyvault create "${CREATE_ARGS[@]}"
+          az keyvault create "${ARGS[@]}"
 
-          # Apply network hardening knobs
-          # Public network access (Disabled/Enabled)
           az keyvault update -n "$KV" -g "$RG" --public-network-access "$PNA"
-
-          # Default action controls firewall fallback (Deny/Allow)
           az keyvault update -n "$KV" -g "$RG" --default-action "$DFA"
 
-          # (Optional) If you need to allow only certain subnets or IPs, add rules like:
-          # az keyvault network-rule add -n "$KV" -g "$RG" --ip-address 203.0.113.10
-          # az keyvault network-rule add -n "$KV" -g "$RG" --vnet-name <vnet> --subnet <subnet>
-
-          # Output the KV id for later steps
           KV_ID=$(az keyvault show -n "$KV" -g "$RG" --query id -o tsv)
           echo "kvId=$KV_ID" >> "$GITHUB_OUTPUT"
 
-      - name: Grant 'Key Vault Secrets Officer' to this Service Principal (optional)
+      - name: Grant 'Key Vault Secrets Officer' to this SP (optional)
         if: ${{ github.event.inputs.grantSecretsOfficerToThisSP == 'true' }}
         shell: bash
         run: |
-          set -euo pipefail
           KV_ID='${{ steps.createkv.outputs.kvId }}'
-          # Get the objectId of the federated SP (the App Registration you used for OIDC)
           APP_ID='${{ vars.AZURE_CLIENT_ID }}'
           OBJ_ID=$(az ad sp show --id "$APP_ID" --query id -o tsv)
-
-          if [[ -z "$OBJ_ID" ]]; then
-            echo "::error title=Service Principal not found::Unable to resolve objectId for AppId $APP_ID"
-            exit 1
-          fi
-
-          # Assign Key Vault Secrets Officer at vault scope
           az role assignment create \
             --assignee-object-id "$OBJ_ID" \
             --assignee-principal-type ServicePrincipal \
@@ -159,4 +146,5 @@ jobs:
 
       - name: Show Key Vault summary
         run: |
-          az keyvault show -n "${{ github.event.inputs.keyVaultName }}" -g "${{ github.event.inputs.rgName }}" -o table
+          az keyvault show -n "${{ steps.sanitizekv.outputs.name }}" \
+            -g "${{ github.event.inputs.rgName }}" -o table

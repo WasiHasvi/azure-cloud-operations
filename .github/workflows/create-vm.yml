@@ -3,9 +3,6 @@ name: Create Azure VM
 on:
   workflow_dispatch:
     inputs:
-      subscriptionId:
-        description: 'Azure Subscription ID'
-        required: true
       resourceGroup:
         description: 'Azure Resource Group'
         required: true

@@ -38,7 +38,7 @@ jobs:
   create-vm:
     runs-on: ubuntu-latest
     permissions:
-      id-token: write   # Required for OIDC
+      id-token: write   # Required for OIDC federation
       contents: read
 
     steps:

@@ -54,8 +54,10 @@ jobs:
 
       - name: Run PowerShell script
         shell: pwsh
-        run: |
-          ./create-vm.ps1 `
+        run: |          
+           Set-StrictMode -Version Latest
+           $ErrorActionPreference = 'Stop'
+           ./scripts/powershell/create-vm.ps1 `
             -SubscriptionId "${{ github.event.inputs.subscriptionId }}" `
             -ResourceGroup "${{ github.event.inputs.resourceGroup }}" `
             -VMName "${{ github.event.inputs.vmName }}" `

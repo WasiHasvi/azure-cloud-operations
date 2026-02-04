@@ -47,7 +47,7 @@ jobs:
         with:
           client-id: ${{ secrets.AZURE_CLIENT_ID }}
           tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ github.event.inputs.subscriptionId }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
 
       - name: Run PowerShell script
         shell: pwsh
@@ -55,7 +55,7 @@ jobs:
            Set-StrictMode -Version Latest
            $ErrorActionPreference = 'Stop'
            ./scripts/powershell/create-vm.ps1 `
-            -SubscriptionId "${{ github.event.inputs.subscriptionId }}" `
+            -SubscriptionId "${{ secrets.AZURE_SUBSCRIPTION_ID }}" `
             -ResourceGroup "${{ github.event.inputs.resourceGroup }}" `
             -VMName "${{ github.event.inputs.vmName }}" `
             -Location "${{ github.event.inputs.location }}" `

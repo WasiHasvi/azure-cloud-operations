@@ -1,0 +1,39 @@
+name: Create Azure Resource Group
+
+on:
+  workflow_dispatch:
+    inputs:
+      rgName:
+        description: "Name of the Resource Group"
+        required: true
+      location:
+        description: "Azure Region (e.g., eastus, westeurope)"
+        default: "eastus"
+        required: true
+
+permissions:
+  id-token: write      # Required for OIDC flow
+  contents: read
+
+jobs:
+  create-resource-group:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Create Resource Group
+        run: |
+          echo "Creating Resource Group: ${{ github.event.inputs.rgName }}"
+          az group create \
+            --name "${{ github.event.inputs.rgName }}" \
+            --location "${{ github.event.inputs.location }}"
+          echo "Resource Group created successfully."

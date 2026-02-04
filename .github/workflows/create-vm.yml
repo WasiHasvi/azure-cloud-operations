@@ -1,0 +1,62 @@
+name: Create Azure VM
+
+on:
+  workflow_dispatch:
+    inputs:
+      resourceGroup:
+        description: 'Azure Resource Group'
+        required: true
+        default: 'MyResourceGroup'
+      vmName:
+        description: 'Virtual Machine Name'
+        required: true
+        default: 'MyVM'
+      location:
+        description: 'Azure Location'
+        required: true
+        default: 'eastus'
+      vmSize:
+        description: 'VM Size'
+        required: true
+        default: 'Standard_B1s'
+      image:
+        description: 'OS Image (UbuntuLTS, Win2019Datacenter, etc.)'
+        required: true
+        default: 'UbuntuLTS'
+      adminUser:
+        description: 'Admin Username'
+        required: true
+        default: 'azureuser'
+      adminPassword:
+        description: 'Admin Password'
+        required: true
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write   # Required for OIDC
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login via OIDC
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Run PowerShell script
+        shell: pwsh
+        run: |
+          ./create-vm.ps1 `
+            -ResourceGroup "${{ github.event.inputs.resourceGroup }}" `
+            -VMName "${{ github.event.inputs.vmName }}" `
+            -Location "${{ github.event.inputs.location }}" `
+            -VMSize "${{ github.event.inputs.vmSize }}" `
+            -Image "${{ github.event.inputs.image }}" `
+            -AdminUser "${{ github.event.inputs.adminUser }}" `
+            -AdminPassword "${{ github.event.inputs.adminPassword }}"

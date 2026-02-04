@@ -1,4 +1,5 @@
 param(
+    [string]$SubscriptionId,
     [string]$ResourceGroup = "MyResourceGroup",
     [string]$VMName = "MyVM",
     [string]$Location = "eastus",
@@ -7,6 +8,9 @@ param(
     [string]$AdminUser = "azureuser",
     [string]$AdminPassword = "P@ssw0rd123!"
 )
+
+Write-Host "Setting Azure subscription to '$SubscriptionId'..."
+az account set --subscription $SubscriptionId
 
 Write-Host "Creating VM '$VMName' in resource group '$ResourceGroup' with image '$Image'..."
 

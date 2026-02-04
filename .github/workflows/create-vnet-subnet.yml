@@ -1,0 +1,155 @@
+name: Create Private VNet & Subnet (No Public IPs, No Open Ports)
+
+on:
+  workflow_dispatch:
+    inputs:
+      rgName:
+        description: "Resource Group name"
+        required: true
+        type: string
+      location:
+        description: "Azure region (e.g., eastus, westeurope, centralindia)"
+        required: true
+        default: "eastus"
+        type: string
+      vnetName:
+        description: "VNet name"
+        required: true
+        default: "vnet-private"
+        type: string
+      vnetCidr:
+        description: "VNet CIDR (e.g., 10.0.0.0/16)"
+        required: true
+        default: "10.0.0.0/16"
+        type: string
+      subnetName:
+        description: "Subnet name"
+        required: true
+        default: "snet-app"
+        type: string
+      subnetCidr:
+        description: "Subnet CIDR (e.g., 10.0.1.0/24)"
+        required: true
+        default: "10.0.1.0/24"
+        type: string
+      nsgName:
+        description: "NSG name"
+        required: true
+        default: "nsg-snet-app"
+        type: string
+
+permissions:
+  id-token: write    # required for OIDC
+  contents: read
+
+jobs:
+  create-network:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Azure Login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Validate inputs (basic CIDR sanity)
+        shell: bash
+        run: |
+          set -euo pipefail
+          for cidr in "${{ github.event.inputs.vnetCidr }}" "${{ github.event.inputs.subnetCidr }}"; do
+            if ! [[ "$cidr" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/([0-9]|[1-2][0-9]|3[0-2])$ ]]; then
+              echo "Invalid CIDR: $cidr" >&2
+              exit 1
+            fi
+          done
+          echo "Inputs validated."
+
+      - name: Create Resource Group (idempotent)
+        run: |
+          az group create \
+            --name "${{ github.event.inputs.rgName }}" \
+            --location "${{ github.event.inputs.location }}" \
+            --tags "owner=${{ github.actor }}" "purpose=private-vnet"
+
+      - name: Create NSG (deny inbound; allow intra-VNet)
+        run: |
+          # Create NSG
+          az network nsg create \
+            -g "${{ github.event.inputs.rgName }}" \
+            -n "${{ github.event.inputs.nsgName }}" \
+            -l "${{ github.event.inputs.location }}"
+
+          # Allow intra-VNet traffic (Inbound)
+          az network nsg rule create \
+            -g "${{ github.event.inputs.rgName }}" \
+            --nsg-name "${{ github.event.inputs.nsgName }}" \
+            -n AllowVnetIntra \
+            --priority 100 \
+            --direction Inbound \
+            --access Allow \
+            --protocol '*' \
+            --source-address-prefixes VirtualNetwork \
+            --destination-address-prefixes VirtualNetwork \
+            --source-port-ranges '*' \
+            --destination-port-ranges '*'
+
+          # (Optional) Allow Azure Load Balancer probes if you might need them later
+          az network nsg rule create \
+            -g "${{ github.event.inputs.rgName }}" \
+            --nsg-name "${{ github.event.inputs.nsgName }}" \
+            -n AllowAzureLoadBalancer \
+            --priority 110 \
+            --direction Inbound \
+            --access Allow \
+            --protocol '*' \
+            --source-address-prefixes AzureLoadBalancer \
+            --destination-address-prefixes '*' \
+            --source-port-ranges '*' \
+            --destination-port-ranges '*'
+
+          # Explicit deny all inbound (catch-all)
+          az network nsg rule create \
+            -g "${{ github.event.inputs.rgName }}" \
+            --nsg-name "${{ github.event.inputs.nsgName }}" \
+            -n DenyAllInbound \
+            --priority 4096 \
+            --direction Inbound \
+            --access Deny \
+            --protocol '*' \
+            --source-address-prefixes '*' \
+            --destination-address-prefixes '*' \
+            --source-port-ranges '*' \
+            --destination-port-ranges '*'
+
+      - name: Create VNet & Subnet (no Public IPs created here)
+        run: |
+          az network vnet create \
+            -g "${{ github.event.inputs.rgName }}" \
+            -n "${{ github.event.inputs.vnetName }}" \
+            -l "${{ github.event.inputs.location }}" \
+            --address-prefixes "${{ github.event.inputs.vnetCidr }}" \
+            --subnet-name "${{ github.event.inputs.subnetName }}" \
+            --subnet-prefixes "${{ github.event.inputs.subnetCidr }}"
+
+      - name: Associate NSG to Subnet
+        run: |
+          az network vnet subnet update \
+            -g "${{ github.event.inputs.rgName }}" \
+            --vnet-name "${{ github.event.inputs.vnetName }}" \
+            -n "${{ github.event.inputs.subnetName }}" \
+            --network-security-group "${{ github.event.inputs.nsgName }}"
+
+      - name: Output summary
+        shell: bash
+        run: |
+          VNET_ID=$(az network vnet show -g "${{ github.event.inputs.rgName }}" -n "${{ github.event.inputs.vnetName }}" --query id -o tsv)
+          SUBNET_ID=$(az network vnet subnet show -g "${{ github.event.inputs.rgName }}" --vnet-name "${{ github.event.inputs.vnetName }}" -n "${{ github.event.inputs.subnetName }}" --query id -o tsv)
+          NSG_ID=$(az network nsg show -g "${{ github.event.inputs.rgName }}" -n "${{ github.event.inputs.nsgName }}" --query id -o tsv)
+          echo "VNet:   $VNET_ID"
+          echo "Subnet: $SUBNET_ID"
+          echo "NSG:    $NSG_ID"

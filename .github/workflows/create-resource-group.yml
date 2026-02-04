@@ -6,21 +6,24 @@ on:
       rgName:
         description: "Name of the Resource Group"
         required: true
+        type: string
+
       location:
-        description: "Azure Region (e.g., eastus, westeurope)"
-        default: "eastus"
+        description: "Azure Region (e.g., eastus, westeurope, centralindia)"
         required: true
+        default: "eastus"
+        type: string
 
 permissions:
-  id-token: write      # Required for OIDC flow
+  id-token: write
   contents: read
 
 jobs:
-  create-resource-group:
+  create-rg:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Azure Login (OIDC)
@@ -32,7 +35,7 @@ jobs:
 
       - name: Create Resource Group
         run: |
-          echo "Creating Resource Group: ${{ github.event.inputs.rgName }}"
+          echo "Creating Resource Group:'${{ github.event.inputs.rgName }}' in '${{ github.event.inputs.location }}'"
           az group create \
             --name "${{ github.event.inputs.rgName }}" \
             --location "${{ github.event.inputs.location }}"
